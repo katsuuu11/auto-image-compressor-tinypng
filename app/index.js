@@ -17,9 +17,11 @@ const COMPRESSIBLE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
 const DEFAULT_DUPLICATE_COOLDOWN_MS = 5000;
 const RECENT_COMPLETION_TTL_MS = 60 * 60 * 1000;
 const RECENT_COMPLETION_CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
+const RECENT_EXTRACT_TTL_MS = 5000;
 
 const inProgressPaths = new Set();
 const recentlyCompletedPaths = new Map();
+const recentExtractPaths = new Map();
 let compressImageHandler = compressImage;
 
 function decodeEntryPath(entry) {
@@ -63,7 +65,7 @@ function getTrackedPath(filePath) {
 }
 
 function getDuplicateSkipResult({ filePath, source, reason }) {
-  console.warn(`[compressImage] skipped reason=${reason} source=${source} path=${filePath}`);
+  console.debug(`[compressImage] skipped reason=${reason} source=${source} path=${filePath}`);
 
   return {
     success: true,
@@ -127,6 +129,30 @@ const cleanupRecentlyCompletedPathsInterval = setInterval(
 
 if (typeof cleanupRecentlyCompletedPathsInterval.unref === 'function') {
   cleanupRecentlyCompletedPathsInterval.unref();
+}
+
+function getDuplicateExtractSkip(filePath, now = Date.now()) {
+  const trackedPath = getTrackedPath(filePath);
+
+  for (const [recentPath, receivedAt] of recentExtractPaths.entries()) {
+    if (now - receivedAt > RECENT_EXTRACT_TTL_MS) {
+      recentExtractPaths.delete(recentPath);
+    }
+  }
+
+  const previousReceivedAt = recentExtractPaths.get(trackedPath);
+  if (previousReceivedAt !== undefined && now - previousReceivedAt <= RECENT_EXTRACT_TTL_MS) {
+    console.debug(`[/extract] skipped reason=duplicate path=${filePath}`);
+    return {
+      success: true,
+      skipped: true,
+      reason: 'Duplicate extract skipped.',
+      filePath,
+    };
+  }
+
+  recentExtractPaths.set(trackedPath, now);
+  return null;
 }
 
 async function extractAndCompressZip(filePath) {
@@ -242,6 +268,11 @@ app.post('/extract', async (req, res) => {
 
   console.log(`[/extract] received path=${filePath}`);
 
+  const duplicateSkip = getDuplicateExtractSkip(filePath);
+  if (duplicateSkip) {
+    return res.json(duplicateSkip);
+  }
+
   try {
     const result = await extractAndCompressZip(filePath);
     return res.json(result);
@@ -263,12 +294,14 @@ module.exports = {
   compressImageWithDuplicateGuard,
   cleanupRecentlyCompletedPaths,
   extractAndCompressZip,
+  getDuplicateExtractSkip,
   setCompressImageForTesting(nextCompressImageHandler) {
     compressImageHandler = nextCompressImageHandler;
   },
   resetDuplicateCompressionStateForTesting() {
     inProgressPaths.clear();
     recentlyCompletedPaths.clear();
+    recentExtractPaths.clear();
     compressImageHandler = compressImage;
   },
 };

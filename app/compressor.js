@@ -10,6 +10,7 @@ const SUPPORTED_FORMATS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
 const SKIPPED_FORMATS = new Set(['.gif', '.svg']);
 
 let tinifyClient;
+let tinifyExhaustedMonth = null;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -29,6 +30,20 @@ function getReductionPercent(originalSize, compressedSize) {
 
 function getTinifyCompressionCount(tinify) {
   return tinify.compressionCount ?? tinify.compression_count;
+}
+
+function getCurrentMonth() {
+  return new Date().toISOString().slice(0, 7);
+}
+
+function isTinifyExhaustedForCurrentMonth() {
+  const currentMonth = getCurrentMonth();
+
+  if (tinifyExhaustedMonth && tinifyExhaustedMonth !== currentMonth) {
+    tinifyExhaustedMonth = null;
+  }
+
+  return tinifyExhaustedMonth === currentMonth;
 }
 
 function getTinifyClient() {
@@ -72,9 +87,17 @@ function logCompressionResult({ engine, filePath, originalSize, compressedSize, 
 
 function logTinifyFallback(error) {
   console.warn(
-    `[compressImage] WARN engine=tinify fallback=sharp reason=${error.name || 'Error'} ` +
+    `[WARN] [compressImage] engine=tinify fallback=sharp reason=${error.name || 'Error'} ` +
       `message=${error.message}`,
   );
+}
+
+function isTinifyMonthlyLimitError(error) {
+  return error.status === 429 || error.statusCode === 429;
+}
+
+function logTinifyExhaustedSkip(filePath) {
+  console.info(`[compressImage] engine=sharp reason=tinifyExhausted file=${filePath}`);
 }
 
 async function writeSharpCompressedBuffer(ext, inputBuffer) {
@@ -93,7 +116,12 @@ async function writeSharpCompressedBuffer(ext, inputBuffer) {
   }
 }
 
-async function writeTinifyCompressedBuffer(inputBuffer) {
+async function writeTinifyCompressedBuffer(inputBuffer, filePath) {
+  if (isTinifyExhaustedForCurrentMonth()) {
+    logTinifyExhaustedSkip(filePath);
+    return null;
+  }
+
   const tinify = initializeTinify(process.env.TINIFY_API_KEY);
 
   if (!tinify) {
@@ -105,6 +133,10 @@ async function writeTinifyCompressedBuffer(inputBuffer) {
     return { buffer: compressedBuffer, tinify };
   } catch (error) {
     if (isTinifyFallbackError(error, tinify)) {
+      if (isTinifyMonthlyLimitError(error)) {
+        tinifyExhaustedMonth = getCurrentMonth();
+      }
+
       logTinifyFallback(error);
       return null;
     }
@@ -113,8 +145,8 @@ async function writeTinifyCompressedBuffer(inputBuffer) {
   }
 }
 
-async function writeCompressedBuffer(ext, inputBuffer) {
-  const tinifyResult = await writeTinifyCompressedBuffer(inputBuffer);
+async function writeCompressedBuffer(ext, inputBuffer, filePath) {
+  const tinifyResult = await writeTinifyCompressedBuffer(inputBuffer, filePath);
 
   if (tinifyResult) {
     return {
@@ -147,7 +179,7 @@ async function compressImage(filePath) {
       await fs.access(filePath);
 
       const originalBuffer = await fs.readFile(filePath);
-      const compressedResult = await writeCompressedBuffer(ext, originalBuffer);
+      const compressedResult = await writeCompressedBuffer(ext, originalBuffer, filePath);
 
       if (!compressedResult) {
         return {
@@ -217,8 +249,13 @@ function setTinifyClientForTesting(nextTinifyClient) {
   tinifyClient = nextTinifyClient;
 }
 
+function resetTinifyExhaustionForTesting() {
+  tinifyExhaustedMonth = null;
+}
+
 module.exports = {
   compressImage,
   initializeTinify,
+  resetTinifyExhaustionForTesting,
   setTinifyClientForTesting,
 };
