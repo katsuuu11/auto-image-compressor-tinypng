@@ -4,7 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 const fs = require('node:fs/promises');
 const sharp = require('sharp');
-const { compressImage, setTinifyClientForTesting } = require('./compressor');
+const { compressImage, resetTinifyExhaustionForTesting, setTinifyClientForTesting } = require('./compressor');
 
 async function withTemporaryImage(ext, contents, callback) {
   const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'image-compressor-'));
@@ -46,6 +46,7 @@ function createFakeTinify({ compressedBuffer, error, compressionCount = 42 }) {
 
 test.afterEach(() => {
   delete process.env.TINIFY_API_KEY;
+  resetTinifyExhaustionForTesting();
   setTinifyClientForTesting(null);
 });
 
@@ -92,6 +93,7 @@ test('compressImage falls back to sharp for tinify account errors', async () => 
     .toBuffer();
   const fakeTinify = createFakeTinify({ compressedBuffer: Buffer.from('unused') });
   const accountError = new fakeTinify.AccountError('monthly limit reached');
+  accountError.status = 429;
   fakeTinify.fromBuffer = () => ({
     async toBuffer() {
       throw accountError;
@@ -120,6 +122,52 @@ test('compressImage falls back to sharp for tinify account errors', async () => 
   assert.match(warnings.join('\n'), /fallback=sharp/);
   assert.match(warnings.join('\n'), /monthly limit reached/);
   assert.match(logs.join('\n'), /engine=sharp/);
+});
+
+test('compressImage skips tinify for the rest of the month after a 429 account error', async () => {
+  process.env.TINIFY_API_KEY = 'test-key';
+  const jpeg = await sharp({
+    create: {
+      width: 8,
+      height: 8,
+      channels: 3,
+      background: { r: 0, g: 255, b: 0 },
+    },
+  })
+    .jpeg({ quality: 100 })
+    .toBuffer();
+  const fakeTinify = createFakeTinify({ compressedBuffer: Buffer.from('unused') });
+  const accountError = new fakeTinify.AccountError('monthly limit reached');
+  accountError.status = 429;
+  let tinifyCalls = 0;
+  fakeTinify.fromBuffer = () => {
+    tinifyCalls += 1;
+    return {
+      async toBuffer() {
+        throw accountError;
+      },
+    };
+  };
+  setTinifyClientForTesting(fakeTinify);
+
+  const infos = [];
+  const originalInfo = console.info;
+  console.info = (message) => infos.push(message);
+
+  try {
+    await withTemporaryImage('.jpg', jpeg, async (filePath) => {
+      const firstResult = await compressImage(filePath);
+      const secondResult = await compressImage(filePath);
+
+      assert.equal(firstResult.success, true);
+      assert.equal(secondResult.success, true);
+      assert.equal(tinifyCalls, 1);
+    });
+  } finally {
+    console.info = originalInfo;
+  }
+
+  assert.match(infos.join('\n'), /reason=tinifyExhausted/);
 });
 
 test('compressImage does not fall back for tinify client errors', async () => {
