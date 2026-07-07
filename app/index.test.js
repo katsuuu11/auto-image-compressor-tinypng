@@ -36,7 +36,7 @@ test('containsCompressibleImage detects supported images using decoded names', (
   assert.equal(
     containsCompressibleImage([
       { entry: { type: 'File' }, entryPath: '資料/readme.txt' },
-      { entry: { type: 'File' }, entryPath: '資料/写真.WEBP' },
+      { entry: { type: 'File' }, entryPath: '資料/写真.PNG' },
     ]),
     true,
   );
@@ -247,4 +247,12 @@ test('compressImageWithDuplicateGuard skips completed paths during cooldown only
 
   assert.match(debugLogs.join('\n'), /reason=cooldown/);
   assert.match(debugLogs.join('\n'), /source=second/);
+});
+
+
+test('containsCompressibleImage excludes WebP from automatic compression targets', () => {
+  assert.equal(
+    containsCompressibleImage([{ entry: { type: 'File' }, entryPath: '資料/写真.webp' }]),
+    false,
+  );
 });

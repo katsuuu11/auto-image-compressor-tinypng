@@ -1,4 +1,4 @@
-const TARGET_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.zip']);
+const TARGET_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.zip']);
 const POLL_INTERVAL_MS = 1500;
 const POLL_TIMEOUT_MS = 10 * 60 * 1000;
 

@@ -6,8 +6,10 @@ const RETRY_DELAY_MS = 500;
 const MAX_RETRIES = 3;
 const TINIFY_MONTHLY_FREE_LIMIT = 500;
 
-const SUPPORTED_FORMATS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
-const SKIPPED_FORMATS = new Set(['.gif', '.svg']);
+const SUPPORTED_FORMATS = new Set(['.jpg', '.jpeg', '.png']);
+const SKIPPED_FORMATS = new Set(['.gif', '.svg', '.webp', '.pdf']);
+const JPEG_MIN_BYTES = 1024 * 1024;
+const DEFAULT_JPEG_QUALITY = 86;
 
 let tinifyClient;
 let tinifyExhaustedMonth = null;
@@ -34,6 +36,22 @@ function getTinifyCompressionCount(tinify) {
 
 function getCurrentMonth() {
   return new Date().toISOString().slice(0, 7);
+}
+
+function isTinifyEnabled() {
+  return process.env.TINIFY_ENABLED === '1' || process.env.COMPRESSION_MODE === 'strong';
+}
+
+function getJpegMinBytes() {
+  const configuredMinBytes = Number(process.env.JPEG_MIN_BYTES);
+
+  return Number.isFinite(configuredMinBytes) && configuredMinBytes >= 0
+    ? configuredMinBytes
+    : JPEG_MIN_BYTES;
+}
+
+function isJpegFormat(ext) {
+  return ext === '.jpg' || ext === '.jpeg';
 }
 
 function isTinifyExhaustedForCurrentMonth() {
@@ -104,13 +122,11 @@ async function writeSharpCompressedBuffer(ext, inputBuffer) {
   switch (ext) {
     case '.jpg':
     case '.jpeg':
-      return sharp(inputBuffer).jpeg({ quality: 80 }).toBuffer();
+      return sharp(inputBuffer).jpeg({ quality: DEFAULT_JPEG_QUALITY }).toBuffer();
     case '.png':
       return sharp(inputBuffer)
         .png({ compressionLevel: 8, effort: 10 })
         .toBuffer();
-    case '.webp':
-      return sharp(inputBuffer).webp({ quality: 80 }).toBuffer();
     default:
       return null;
   }
@@ -119,6 +135,10 @@ async function writeSharpCompressedBuffer(ext, inputBuffer) {
 async function writeTinifyCompressedBuffer(inputBuffer, filePath) {
   if (isTinifyExhaustedForCurrentMonth()) {
     logTinifyExhaustedSkip(filePath);
+    return null;
+  }
+
+  if (!isTinifyEnabled()) {
     return null;
   }
 
@@ -179,6 +199,16 @@ async function compressImage(filePath) {
       await fs.access(filePath);
 
       const originalBuffer = await fs.readFile(filePath);
+
+      if (isJpegFormat(ext) && originalBuffer.length < getJpegMinBytes()) {
+        return {
+          success: true,
+          skipped: true,
+          reason: `JPEG is below compression threshold (${getJpegMinBytes()} bytes).`,
+          filePath,
+        };
+      }
+
       const compressedResult = await writeCompressedBuffer(ext, originalBuffer, filePath);
 
       if (!compressedResult) {
