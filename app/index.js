@@ -3,7 +3,6 @@ const path = require('node:path');
 const fs = require('node:fs/promises');
 const fss = require('node:fs');
 const express = require('express');
-const cors = require('cors');
 const unzipper = require('unzipper');
 const iconv = require('iconv-lite');
 const { compressImage, initializeTinify } = require('./compressor');
@@ -223,20 +222,6 @@ async function extractAndCompressZip(filePath) {
 }
 
 app.use(express.json());
-app.use(
-  cors({
-    origin(origin, callback) {
-      if (!origin) {
-        return callback(null, true);
-      }
-      if (origin.startsWith('chrome-extension://')) {
-        return callback(null, true);
-      }
-      return callback(new Error('Not allowed by CORS'));
-    },
-  }),
-);
-
 app.post('/compress', async (req, res) => {
   const { filePath } = req.body || {};
 
