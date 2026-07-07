@@ -2,6 +2,7 @@ require('dotenv/config');
 const path = require('node:path');
 const fs = require('node:fs/promises');
 const fss = require('node:fs');
+const { TextDecoder } = require('node:util');
 const express = require('express');
 const unzipper = require('unzipper');
 const iconv = require('iconv-lite');
@@ -23,12 +24,42 @@ const recentlyCompletedPaths = new Map();
 const recentExtractPaths = new Map();
 let compressImageHandler = compressImage;
 
+const fatalUtf8Decoder = new TextDecoder('utf-8', { fatal: true });
+
+function decodeUtf8(buffer) {
+  try {
+    return fatalUtf8Decoder.decode(buffer);
+  } catch {
+    return null;
+  }
+}
+
+function isValidUtf8(buffer) {
+  return decodeUtf8(buffer) !== null;
+}
+
+function looksLikeMojibake(decodedPath) {
+  // Some CP932 byte pairs are also valid UTF-8, so prefer UTF-8 only when the CP932 result has common mojibake markers.
+  return /[�縺繧荳譁莨髫隕蜀譌譛隱樒判蜒雉隲嶌]/.test(decodedPath);
+}
+
+function decodeLegacyZipEntryPath(pathBuffer) {
+  const utf8Path = decodeUtf8(pathBuffer);
+  const cp932Path = iconv.decode(pathBuffer, 'cp932');
+
+  if (utf8Path && looksLikeMojibake(cp932Path)) {
+    return utf8Path;
+  }
+
+  return cp932Path;
+}
+
 function decodeEntryPath(entry) {
   const isUnicode = entry.isUnicode ?? entry.props?.flags?.isUnicode;
   const pathBuffer = entry.pathBuffer ?? entry.props?.pathBuffer;
 
   if (!isUnicode && pathBuffer) {
-    return iconv.decode(pathBuffer, 'shift_jis');
+    return decodeLegacyZipEntryPath(pathBuffer);
   }
 
   return entry.path;
@@ -312,6 +343,8 @@ if (require.main === module) {
 
 module.exports = {
   containsCompressibleImage,
+  isValidUtf8,
+  looksLikeMojibake,
   containsWebsiteLikeImagePath,
   decodeEntryPath,
   getSafeExtractionPath,

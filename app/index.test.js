@@ -12,6 +12,8 @@ const {
   extractAndCompressZip,
   getDuplicateExtractSkip,
   getSafeExtractionPath,
+  isValidUtf8,
+  looksLikeMojibake,
   resetDuplicateCompressionStateForTesting,
   setCompressImageForTesting,
 } = require('./index');
@@ -24,6 +26,33 @@ test('decodeEntryPath decodes non-Unicode Shift-JIS file names as UTF-8 strings'
     isUnicode: false,
   };
 
+  assert.equal(decodeEntryPath(entry), fileName);
+});
+
+test('decodeEntryPath keeps valid UTF-8 names even when the ZIP Unicode flag is missing', () => {
+  const fileName = '請求書.xlsx';
+  const pathBuffer = Buffer.from(fileName, 'utf8');
+  const entry = {
+    path: pathBuffer.toString('binary'),
+    pathBuffer,
+    isUnicode: false,
+  };
+
+  assert.equal(isValidUtf8(pathBuffer), true);
+  assert.equal(decodeEntryPath(entry), fileName);
+});
+
+test('decodeEntryPath keeps CP932 names that happen to be valid UTF-8 byte sequences', () => {
+  const fileName = 'ﾂｩ.xlsx';
+  const pathBuffer = iconv.encode(fileName, 'cp932');
+  const entry = {
+    path: pathBuffer.toString('binary'),
+    pathBuffer,
+    isUnicode: false,
+  };
+
+  assert.equal(isValidUtf8(pathBuffer), true);
+  assert.equal(looksLikeMojibake(iconv.decode(pathBuffer, 'cp932')), false);
   assert.equal(decodeEntryPath(entry), fileName);
 });
 
@@ -155,6 +184,36 @@ test('extractAndCompressZip extracts Shift-JIS image names with readable Japanes
     assert.equal(result.skipped, false);
     assert.equal(result.compressedResults.length, 1);
     await fs.access(path.join(temporaryDirectory, imageName));
+  } finally {
+    await fs.rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test('extractAndCompressZip preserves UTF-8 non-image file names in mixed ZIPs', async () => {
+  const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'image-compressor-'));
+  const zipPath = path.join(temporaryDirectory, 'mixed.zip');
+  const imageName = '日本語画像.png';
+  const spreadsheetName = '請求書.xlsx';
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAFgAI/ScL3WQAAAABJRU5ErkJggg==',
+    'base64',
+  );
+
+  try {
+    await fs.writeFile(
+      zipPath,
+      createStoredZipFromEntries([
+        { fileNameBuffer: iconv.encode(imageName, 'shift_jis'), contents: png },
+        { fileNameBuffer: Buffer.from(spreadsheetName, 'utf8'), contents: Buffer.from('spreadsheet') },
+      ]),
+    );
+
+    const result = await extractAndCompressZip(zipPath);
+
+    assert.equal(result.skipped, false);
+    assert.equal(result.compressedResults.length, 1);
+    await fs.access(path.join(temporaryDirectory, imageName));
+    await fs.access(path.join(temporaryDirectory, spreadsheetName));
   } finally {
     await fs.rm(temporaryDirectory, { recursive: true, force: true });
   }
