@@ -4,7 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 const fs = require('node:fs/promises');
 const sharp = require('sharp');
-const { compressImage, resetTinifyExhaustionForTesting, setTinifyClientForTesting } = require('./compressor');
+const { OUTPUT_DIR_NAME, compressImage, resetTinifyExhaustionForTesting, setTinifyClientForTesting } = require('./compressor');
 
 async function withTemporaryImage(ext, contents, callback) {
   const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'image-compressor-'));
@@ -67,12 +67,17 @@ test('compressImage uses tinify when TINIFY_API_KEY is set', async () => {
   try {
     await withTemporaryImage('.png', Buffer.from('this image is intentionally larger'), async (filePath) => {
       const result = await compressImage(filePath);
-      const writtenBuffer = await fs.readFile(filePath);
+      const outputFilePath = path.join(path.dirname(filePath), OUTPUT_DIR_NAME, path.basename(filePath));
+      const originalBuffer = await fs.readFile(filePath);
+      const writtenBuffer = await fs.readFile(outputFilePath);
 
       assert.equal(result.success, true);
       assert.equal(result.skipped, false);
+      assert.equal(result.filePath, filePath);
+      assert.equal(result.outputFilePath, outputFilePath);
       assert.equal(result.originalSize, 34);
       assert.equal(result.compressedSize, compressedBuffer.length);
+      assert.deepEqual(originalBuffer, Buffer.from('this image is intentionally larger'));
       assert.deepEqual(writtenBuffer, compressedBuffer);
     });
   } finally {
@@ -229,6 +234,25 @@ test('compressImage uses sharp for PNG by default even when a TinyPNG API key ex
 
     assert.equal(result.success, true);
     assert.equal(tinifyCalls, 0);
+  });
+});
+
+test('compressImage writes compressed images to a compressed folder without renaming the file', async () => {
+  process.env.TINIFY_API_KEY = 'test-key';
+  process.env.TINIFY_ENABLED = '1';
+  const compressedBuffer = Buffer.from('tiny');
+  const fakeTinify = createFakeTinify({ compressedBuffer });
+  setTinifyClientForTesting(fakeTinify);
+
+  await withTemporaryImage('.png', Buffer.from('large enough png placeholder'), async (filePath) => {
+    const result = await compressImage(filePath);
+    const expectedOutputPath = path.join(path.dirname(filePath), OUTPUT_DIR_NAME, path.basename(filePath));
+
+    assert.equal(result.success, true);
+    assert.equal(result.skipped, false);
+    assert.equal(result.outputFilePath, expectedOutputPath);
+    assert.deepEqual(await fs.readFile(filePath), Buffer.from('large enough png placeholder'));
+    assert.deepEqual(await fs.readFile(expectedOutputPath), compressedBuffer);
   });
 });
 

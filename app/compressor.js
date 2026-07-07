@@ -10,6 +10,7 @@ const SUPPORTED_FORMATS = new Set(['.jpg', '.jpeg', '.png']);
 const SKIPPED_FORMATS = new Set(['.gif', '.svg', '.webp', '.pdf']);
 const JPEG_MIN_BYTES = 1024 * 1024;
 const DEFAULT_JPEG_QUALITY = 86;
+const OUTPUT_DIR_NAME = 'compressed';
 
 let tinifyClient;
 let tinifyExhaustedMonth = null;
@@ -20,6 +21,10 @@ function sleep(ms) {
 
 function getFormat(filePath) {
   return path.extname(filePath).toLowerCase();
+}
+
+function getOutputFilePath(filePath) {
+  return path.join(path.dirname(filePath), OUTPUT_DIR_NAME, path.basename(filePath));
 }
 
 function getReductionPercent(originalSize, compressedSize) {
@@ -238,12 +243,15 @@ async function compressImage(filePath) {
         };
       }
 
-      await fs.writeFile(filePath, compressedBuffer);
+      const outputFilePath = getOutputFilePath(filePath);
+      await fs.mkdir(path.dirname(outputFilePath), { recursive: true });
+      await fs.writeFile(outputFilePath, compressedBuffer);
 
       return {
         success: true,
         skipped: false,
         filePath,
+        outputFilePath,
         originalSize: originalBuffer.length,
         compressedSize: compressedBuffer.length,
       };
@@ -284,6 +292,7 @@ function resetTinifyExhaustionForTesting() {
 }
 
 module.exports = {
+  OUTPUT_DIR_NAME,
   compressImage,
   initializeTinify,
   resetTinifyExhaustionForTesting,
