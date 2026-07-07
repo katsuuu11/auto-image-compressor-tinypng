@@ -144,7 +144,7 @@ function setTinifyApiKey() {
 }
 
 function toggleTinify() {
-  const current = store.get('tinifyEnabled', true);
+  const current = store.get('tinifyEnabled', false);
   store.set('tinifyEnabled', !current);
   pushLog(`TinyPNG ${!current ? '有効' : '無効'} に変更しました`);
   if (serverRunning) {
@@ -156,7 +156,7 @@ function toggleTinify() {
 
 function buildTinifyGauge() {
   const count = store.get('tinifyCount', 0);
-  const enabled = store.get('tinifyEnabled', true);
+  const enabled = store.get('tinifyEnabled', false);
   const remaining = 500 - count;
   const filled = Math.round((remaining / 500) * 10);
   const empty = 10 - filled;
@@ -172,7 +172,7 @@ let serverRunning = false;
 const logs = [];
 const folderWatchers = new Map();
 const processingFiles = new Set();
-const WATCHED_IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
+const WATCHED_IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png']);
 const WATCHED_FILE_EXTENSIONS = new Set([...WATCHED_IMAGE_EXTENSIONS, '.zip']);
 
 function pushLog(message) {
@@ -351,7 +351,7 @@ function updateTrayMenu() {
     { label: statusLabel, enabled: false },
     { label: buildTinifyGauge(), enabled: false },
     {
-      label: store.get('tinifyEnabled', true) ? 'TinyPNG を無効にする' : 'TinyPNG を有効にする',
+      label: store.get('tinifyEnabled', false) ? 'TinyPNG を無効にする' : 'TinyPNG を有効にする',
       click: toggleTinify,
     },
     { type: 'separator' },
@@ -375,7 +375,7 @@ function startServer() {
 
   const serverPath = path.join(__dirname, 'app', 'index.js');
   const tinifyApiKey = store.get('tinifyApiKey', '');
-  const tinifyEnabled = store.get('tinifyEnabled', true);
+  const tinifyEnabled = store.get('tinifyEnabled', false);
   serverProcess = spawn(process.execPath, [serverPath], {
     stdio: ['ignore', 'pipe', 'pipe'],
     env: {

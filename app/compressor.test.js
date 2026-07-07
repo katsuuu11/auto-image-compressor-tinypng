@@ -46,12 +46,16 @@ function createFakeTinify({ compressedBuffer, error, compressionCount = 42 }) {
 
 test.afterEach(() => {
   delete process.env.TINIFY_API_KEY;
+  delete process.env.TINIFY_ENABLED;
+  delete process.env.COMPRESSION_MODE;
+  delete process.env.JPEG_MIN_BYTES;
   resetTinifyExhaustionForTesting();
   setTinifyClientForTesting(null);
 });
 
 test('compressImage uses tinify when TINIFY_API_KEY is set', async () => {
   process.env.TINIFY_API_KEY = 'test-key';
+  process.env.TINIFY_ENABLED = '1';
   const compressedBuffer = Buffer.from('small');
   const fakeTinify = createFakeTinify({ compressedBuffer, compressionCount: 42 });
   setTinifyClientForTesting(fakeTinify);
@@ -81,6 +85,8 @@ test('compressImage uses tinify when TINIFY_API_KEY is set', async () => {
 
 test('compressImage falls back to sharp for tinify account errors', async () => {
   process.env.TINIFY_API_KEY = 'test-key';
+  process.env.TINIFY_ENABLED = '1';
+  process.env.JPEG_MIN_BYTES = '0';
   const jpeg = await sharp({
     create: {
       width: 8,
@@ -126,6 +132,8 @@ test('compressImage falls back to sharp for tinify account errors', async () => 
 
 test('compressImage skips tinify for the rest of the month after a 429 account error', async () => {
   process.env.TINIFY_API_KEY = 'test-key';
+  process.env.TINIFY_ENABLED = '1';
+  process.env.JPEG_MIN_BYTES = '0';
   const jpeg = await sharp({
     create: {
       width: 8,
@@ -172,6 +180,7 @@ test('compressImage skips tinify for the rest of the month after a 429 account e
 
 test('compressImage does not fall back for tinify client errors', async () => {
   process.env.TINIFY_API_KEY = 'test-key';
+  process.env.TINIFY_ENABLED = '1';
   const fakeTinify = createFakeTinify({ compressedBuffer: Buffer.from('unused') });
   const clientError = new fakeTinify.ClientError('bad image');
   fakeTinify.fromBuffer = () => ({
@@ -186,5 +195,80 @@ test('compressImage does not fall back for tinify client errors', async () => {
 
     assert.equal(result.success, false);
     assert.match(result.error, /bad image/);
+  });
+});
+
+
+test('compressImage uses sharp for PNG by default even when a TinyPNG API key exists', async () => {
+  process.env.TINIFY_API_KEY = 'test-key';
+  const fakeTinify = createFakeTinify({ compressedBuffer: Buffer.from('tiny') });
+  let tinifyCalls = 0;
+  fakeTinify.fromBuffer = () => {
+    tinifyCalls += 1;
+    return {
+      async toBuffer() {
+        return Buffer.from('tiny');
+      },
+    };
+  };
+  setTinifyClientForTesting(fakeTinify);
+
+  const png = await sharp({
+    create: {
+      width: 16,
+      height: 16,
+      channels: 4,
+      background: { r: 0, g: 0, b: 255, alpha: 1 },
+    },
+  })
+    .png({ compressionLevel: 0 })
+    .toBuffer();
+
+  await withTemporaryImage('.png', png, async (filePath) => {
+    const result = await compressImage(filePath);
+
+    assert.equal(result.success, true);
+    assert.equal(tinifyCalls, 0);
+  });
+});
+
+test('compressImage skips small JPEG files by default', async () => {
+  const jpeg = await sharp({
+    create: {
+      width: 8,
+      height: 8,
+      channels: 3,
+      background: { r: 255, g: 255, b: 0 },
+    },
+  })
+    .jpeg({ quality: 100 })
+    .toBuffer();
+
+  await withTemporaryImage('.jpg', jpeg, async (filePath) => {
+    const result = await compressImage(filePath);
+    const writtenBuffer = await fs.readFile(filePath);
+
+    assert.equal(result.success, true);
+    assert.equal(result.skipped, true);
+    assert.match(result.reason, /JPEG is below compression threshold/);
+    assert.deepEqual(writtenBuffer, jpeg);
+  });
+});
+
+test('compressImage skips WebP and PDF automatic compression targets', async () => {
+  await withTemporaryImage('.webp', Buffer.from('webp'), async (filePath) => {
+    const result = await compressImage(filePath);
+
+    assert.equal(result.success, true);
+    assert.equal(result.skipped, true);
+    assert.match(result.reason, /Unsupported format: \.webp/);
+  });
+
+  await withTemporaryImage('.pdf', Buffer.from('%PDF'), async (filePath) => {
+    const result = await compressImage(filePath);
+
+    assert.equal(result.success, true);
+    assert.equal(result.skipped, true);
+    assert.match(result.reason, /Unsupported format: \.pdf/);
   });
 });

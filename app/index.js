@@ -13,7 +13,7 @@ initializeTinify(process.env.TINIFY_API_KEY);
 const PORT = 3000;
 const app = express();
 const IMAGE_PATH_PATTERNS = ['images/', 'image/', 'img/'];
-const COMPRESSIBLE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
+const COMPRESSIBLE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png']);
 const DEFAULT_DUPLICATE_COOLDOWN_MS = 5000;
 const RECENT_COMPLETION_TTL_MS = 60 * 60 * 1000;
 const RECENT_COMPLETION_CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
@@ -177,7 +177,7 @@ async function extractAndCompressZip(filePath) {
     return {
       success: true,
       skipped: true,
-      reason: 'ZIP does not contain compressible images (jpg/jpeg/png/webp).',
+      reason: 'ZIP does not contain compressible images (png, or jpg/jpeg above the compressor threshold).',
       filePath,
       extractedTo: zipDirectory,
     };
