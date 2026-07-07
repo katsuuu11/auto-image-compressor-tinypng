@@ -1,12 +1,17 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const os = require('node:os');
+const path = require('node:path');
+const fs = require('node:fs/promises');
 const iconv = require('iconv-lite');
 const {
   compressImageWithDuplicateGuard,
   containsCompressibleImage,
   containsWebsiteLikeImagePath,
   decodeEntryPath,
+  extractAndCompressZip,
   getDuplicateExtractSkip,
+  getSafeExtractionPath,
   resetDuplicateCompressionStateForTesting,
   setCompressImageForTesting,
 } = require('./index');
@@ -54,10 +59,21 @@ test('containsWebsiteLikeImagePath checks decoded paths', () => {
   assert.equal(containsWebsiteLikeImagePath([{ entryPath: '写真.jpg' }]), false);
 });
 
-const os = require('node:os');
-const path = require('node:path');
-const fs = require('node:fs/promises');
-const { extractAndCompressZip } = require('./index');
+test('getSafeExtractionPath rejects ZIP entries outside the extraction directory', () => {
+  const zipDirectory = path.join('/tmp', 'image-compressor');
+
+  assert.equal(
+    getSafeExtractionPath(zipDirectory, 'safe/画像.png'),
+    path.join(zipDirectory, 'safe', '画像.png'),
+  );
+  assert.equal(
+    getSafeExtractionPath(zipDirectory, '..safe/画像.png'),
+    path.join(zipDirectory, '..safe', '画像.png'),
+  );
+  assert.equal(getSafeExtractionPath(zipDirectory, '../outside.png'), null);
+  assert.equal(getSafeExtractionPath(zipDirectory, '/tmp/outside.png'), null);
+  assert.equal(getSafeExtractionPath(zipDirectory, 'C:/outside.png'), null);
+});
 
 const CRC_TABLE = Array.from({ length: 256 }, (_, index) => {
   let crc = index;
@@ -76,39 +92,50 @@ function crc32(buffer) {
 }
 
 function createStoredZip(fileNameBuffer, contents) {
-  const checksum = crc32(contents);
-  const localHeader = Buffer.alloc(30);
-  localHeader.writeUInt32LE(0x04034b50, 0);
-  localHeader.writeUInt16LE(20, 4);
-  localHeader.writeUInt32LE(checksum, 14);
-  localHeader.writeUInt32LE(contents.length, 18);
-  localHeader.writeUInt32LE(contents.length, 22);
-  localHeader.writeUInt16LE(fileNameBuffer.length, 26);
+  return createStoredZipFromEntries([{ fileNameBuffer, contents }]);
+}
 
-  const centralHeader = Buffer.alloc(46);
-  centralHeader.writeUInt32LE(0x02014b50, 0);
-  centralHeader.writeUInt16LE(20, 4);
-  centralHeader.writeUInt16LE(20, 6);
-  centralHeader.writeUInt32LE(checksum, 16);
-  centralHeader.writeUInt32LE(contents.length, 20);
-  centralHeader.writeUInt32LE(contents.length, 24);
-  centralHeader.writeUInt16LE(fileNameBuffer.length, 28);
+function createStoredZipFromEntries(entries) {
+  const localParts = [];
+  const centralParts = [];
+  let localOffset = 0;
 
+  for (const { fileNameBuffer, contents } of entries) {
+    const checksum = crc32(contents);
+    const localHeader = Buffer.alloc(30);
+    localHeader.writeUInt32LE(0x04034b50, 0);
+    localHeader.writeUInt16LE(20, 4);
+    localHeader.writeUInt32LE(checksum, 14);
+    localHeader.writeUInt32LE(contents.length, 18);
+    localHeader.writeUInt32LE(contents.length, 22);
+    localHeader.writeUInt16LE(fileNameBuffer.length, 26);
+
+    localParts.push(localHeader, fileNameBuffer, contents);
+
+    const centralHeader = Buffer.alloc(46);
+    centralHeader.writeUInt32LE(0x02014b50, 0);
+    centralHeader.writeUInt16LE(20, 4);
+    centralHeader.writeUInt16LE(20, 6);
+    centralHeader.writeUInt32LE(checksum, 16);
+    centralHeader.writeUInt32LE(contents.length, 20);
+    centralHeader.writeUInt32LE(contents.length, 24);
+    centralHeader.writeUInt16LE(fileNameBuffer.length, 28);
+    centralHeader.writeUInt32LE(localOffset, 42);
+
+    centralParts.push(centralHeader, fileNameBuffer);
+    localOffset += localHeader.length + fileNameBuffer.length + contents.length;
+  }
+
+  const centralDirectory = Buffer.concat(centralParts);
+  const localDirectory = Buffer.concat(localParts);
   const endRecord = Buffer.alloc(22);
   endRecord.writeUInt32LE(0x06054b50, 0);
-  endRecord.writeUInt16LE(1, 8);
-  endRecord.writeUInt16LE(1, 10);
-  endRecord.writeUInt32LE(centralHeader.length + fileNameBuffer.length, 12);
-  endRecord.writeUInt32LE(localHeader.length + fileNameBuffer.length + contents.length, 16);
+  endRecord.writeUInt16LE(entries.length, 8);
+  endRecord.writeUInt16LE(entries.length, 10);
+  endRecord.writeUInt32LE(centralDirectory.length, 12);
+  endRecord.writeUInt32LE(localDirectory.length, 16);
 
-  return Buffer.concat([
-    localHeader,
-    fileNameBuffer,
-    contents,
-    centralHeader,
-    fileNameBuffer,
-    endRecord,
-  ]);
+  return Buffer.concat([localDirectory, centralDirectory, endRecord]);
 }
 
 test('extractAndCompressZip extracts Shift-JIS image names with readable Japanese characters', async () => {
@@ -151,6 +178,60 @@ test('extractAndCompressZip skips extraction when a ZIP contains no supported im
     await assert.rejects(fs.access(path.join(temporaryDirectory, textName)), { code: 'ENOENT' });
   } finally {
     await fs.rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test('extractAndCompressZip rejects unsafe ZIP entry paths', async () => {
+  const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'image-compressor-'));
+  const zipPath = path.join(temporaryDirectory, 'unsafe.zip');
+  const outsidePath = path.join(temporaryDirectory, '..', 'outside.png');
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAFgAI/ScL3WQAAAABJRU5ErkJggg==',
+    'base64',
+  );
+
+  try {
+    await fs.writeFile(zipPath, createStoredZip(Buffer.from('../outside.png'), png));
+
+    const result = await extractAndCompressZip(zipPath);
+
+    assert.equal(result.success, false);
+    assert.match(result.error, /Unsafe ZIP entry path/);
+    await assert.rejects(fs.access(outsidePath), { code: 'ENOENT' });
+  } finally {
+    await fs.rm(temporaryDirectory, { recursive: true, force: true });
+    await fs.rm(outsidePath, { force: true });
+  }
+});
+
+test('extractAndCompressZip rejects unsafe ZIP entry paths before writing any files', async () => {
+  const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'image-compressor-'));
+  const zipPath = path.join(temporaryDirectory, 'partially-unsafe.zip');
+  const safePath = path.join(temporaryDirectory, 'safe.png');
+  const outsidePath = path.join(temporaryDirectory, '..', 'outside.png');
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAFgAI/ScL3WQAAAABJRU5ErkJggg==',
+    'base64',
+  );
+
+  try {
+    await fs.writeFile(
+      zipPath,
+      createStoredZipFromEntries([
+        { fileNameBuffer: Buffer.from('safe.png'), contents: png },
+        { fileNameBuffer: Buffer.from('../outside.png'), contents: png },
+      ]),
+    );
+
+    const result = await extractAndCompressZip(zipPath);
+
+    assert.equal(result.success, false);
+    assert.match(result.error, /Unsafe ZIP entry path/);
+    await assert.rejects(fs.access(safePath), { code: 'ENOENT' });
+    await assert.rejects(fs.access(outsidePath), { code: 'ENOENT' });
+  } finally {
+    await fs.rm(temporaryDirectory, { recursive: true, force: true });
+    await fs.rm(outsidePath, { force: true });
   }
 });
 
@@ -247,6 +328,24 @@ test('compressImageWithDuplicateGuard skips completed paths during cooldown only
 
   assert.match(debugLogs.join('\n'), /reason=cooldown/);
   assert.match(debugLogs.join('\n'), /source=second/);
+});
+
+test('compressImageWithDuplicateGuard does not cooldown failed compression results', async () => {
+  let calls = 0;
+  setCompressImageForTesting(async (filePath) => {
+    calls += 1;
+    return calls === 1
+      ? { success: false, error: 'temporary failure', filePath }
+      : { success: true, skipped: false, filePath };
+  });
+
+  const firstResult = await compressImageWithDuplicateGuard('/tmp/retry.png', 'first');
+  const secondResult = await compressImageWithDuplicateGuard('/tmp/retry.png', 'second');
+
+  assert.equal(firstResult.success, false);
+  assert.equal(secondResult.success, true);
+  assert.equal(secondResult.skipped, false);
+  assert.equal(calls, 2);
 });
 
 

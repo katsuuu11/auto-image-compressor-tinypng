@@ -51,6 +51,24 @@ function containsCompressibleImage(entries) {
   );
 }
 
+function getSafeExtractionPath(zipDirectory, entryPath) {
+  const normalizedEntryPath = entryPath.replace(/\\/g, '/');
+
+  if (path.isAbsolute(normalizedEntryPath) || /^[a-zA-Z]:\//.test(normalizedEntryPath)) {
+    return null;
+  }
+
+  const resolvedZipDirectory = path.resolve(zipDirectory);
+  const destinationPath = path.resolve(resolvedZipDirectory, normalizedEntryPath);
+  const relativePath = path.relative(resolvedZipDirectory, destinationPath);
+
+  if (relativePath === '' || relativePath === '..' || relativePath.startsWith(`..${path.sep}`) || path.isAbsolute(relativePath)) {
+    return null;
+  }
+
+  return destinationPath;
+}
+
 function getDuplicateCooldownMs() {
   const configuredCooldown = Number(process.env.COMPRESS_DUPLICATE_COOLDOWN_MS);
 
@@ -114,10 +132,15 @@ async function compressImageWithDuplicateGuard(filePath, source = 'unknown') {
   inProgressPaths.add(trackedPath);
 
   try {
-    return await compressImageHandler(filePath);
+    const result = await compressImageHandler(filePath);
+
+    if (result.success) {
+      recentlyCompletedPaths.set(trackedPath, Date.now());
+    }
+
+    return result;
   } finally {
     inProgressPaths.delete(trackedPath);
-    recentlyCompletedPaths.set(trackedPath, Date.now());
   }
 }
 
@@ -182,11 +205,26 @@ async function extractAndCompressZip(filePath) {
     };
   }
 
-  const compressedResults = [];
+  const extractionEntries = [];
 
   for (const { entry, entryPath } of entries) {
-    const destinationPath = path.join(zipDirectory, entryPath);
+    const destinationPath = getSafeExtractionPath(zipDirectory, entryPath);
 
+    if (!destinationPath) {
+      return {
+        success: false,
+        error: `Unsafe ZIP entry path: ${entryPath}`,
+        filePath,
+        extractedTo: zipDirectory,
+      };
+    }
+
+    extractionEntries.push({ entry, entryPath, destinationPath });
+  }
+
+  const compressedResults = [];
+
+  for (const { entry, destinationPath } of extractionEntries) {
     if (entry.type === 'Directory') {
       await fs.mkdir(destinationPath, { recursive: true });
       continue;
@@ -276,6 +314,7 @@ module.exports = {
   containsCompressibleImage,
   containsWebsiteLikeImagePath,
   decodeEntryPath,
+  getSafeExtractionPath,
   compressImageWithDuplicateGuard,
   cleanupRecentlyCompletedPaths,
   extractAndCompressZip,
