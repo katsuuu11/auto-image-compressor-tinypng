@@ -4,7 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 const fs = require('node:fs/promises');
 const sharp = require('sharp');
-const { OUTPUT_DIR_NAME, compressImage, resetTinifyExhaustionForTesting, setTinifyClientForTesting } = require('./compressor');
+const { COMPRESSING_SUFFIX, compressImage, resetTinifyExhaustionForTesting, setTinifyClientForTesting } = require('./compressor');
 
 async function withTemporaryImage(ext, contents, callback) {
   const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'image-compressor-'));
@@ -67,9 +67,9 @@ test('compressImage uses tinify when TINIFY_API_KEY is set', async () => {
   try {
     await withTemporaryImage('.png', Buffer.from('this image is intentionally larger'), async (filePath) => {
       const result = await compressImage(filePath);
-      const outputFilePath = path.join(path.dirname(filePath), OUTPUT_DIR_NAME, path.basename(filePath));
+      const outputFilePath = filePath;
       const originalBuffer = await fs.readFile(filePath);
-      const writtenBuffer = await fs.readFile(outputFilePath);
+      const hiddenPath = path.join(path.dirname(filePath), `.${path.basename(filePath)}${COMPRESSING_SUFFIX}`);
 
       assert.equal(result.success, true);
       assert.equal(result.skipped, false);
@@ -77,8 +77,8 @@ test('compressImage uses tinify when TINIFY_API_KEY is set', async () => {
       assert.equal(result.outputFilePath, outputFilePath);
       assert.equal(result.originalSize, 34);
       assert.equal(result.compressedSize, compressedBuffer.length);
-      assert.deepEqual(originalBuffer, Buffer.from('this image is intentionally larger'));
-      assert.deepEqual(writtenBuffer, compressedBuffer);
+      assert.deepEqual(originalBuffer, compressedBuffer);
+      await assert.rejects(fs.access(hiddenPath), { code: 'ENOENT' });
     });
   } finally {
     console.log = originalLog;
@@ -237,7 +237,7 @@ test('compressImage uses sharp for PNG by default even when a TinyPNG API key ex
   });
 });
 
-test('compressImage writes compressed images to a compressed folder without renaming the file', async () => {
+test('compressImage replaces the original path with a smaller compressed image without creating a compressed folder', async () => {
   process.env.TINIFY_API_KEY = 'test-key';
   process.env.TINIFY_ENABLED = '1';
   const compressedBuffer = Buffer.from('tiny');
@@ -246,13 +246,15 @@ test('compressImage writes compressed images to a compressed folder without rena
 
   await withTemporaryImage('.png', Buffer.from('large enough png placeholder'), async (filePath) => {
     const result = await compressImage(filePath);
-    const expectedOutputPath = path.join(path.dirname(filePath), OUTPUT_DIR_NAME, path.basename(filePath));
+    const compressedDirectoryPath = path.join(path.dirname(filePath), 'compressed');
+    const hiddenPath = path.join(path.dirname(filePath), `.${path.basename(filePath)}${COMPRESSING_SUFFIX}`);
 
     assert.equal(result.success, true);
     assert.equal(result.skipped, false);
-    assert.equal(result.outputFilePath, expectedOutputPath);
-    assert.deepEqual(await fs.readFile(filePath), Buffer.from('large enough png placeholder'));
-    assert.deepEqual(await fs.readFile(expectedOutputPath), compressedBuffer);
+    assert.equal(result.outputFilePath, filePath);
+    assert.deepEqual(await fs.readFile(filePath), compressedBuffer);
+    await assert.rejects(fs.access(hiddenPath), { code: 'ENOENT' });
+    await assert.rejects(fs.access(compressedDirectoryPath), { code: 'ENOENT' });
   });
 });
 
@@ -294,5 +296,68 @@ test('compressImage skips WebP and PDF automatic compression targets', async () 
     assert.equal(result.success, true);
     assert.equal(result.skipped, true);
     assert.match(result.reason, /Unsupported format: \.pdf/);
+  });
+});
+
+test('compressImage hides the original file while compression is in progress and restores it when not smaller', async () => {
+  process.env.TINIFY_API_KEY = 'test-key';
+  process.env.TINIFY_ENABLED = '1';
+  let releaseCompression;
+  let markCompressionStarted;
+  const compressionCanFinish = new Promise((resolve) => {
+    releaseCompression = resolve;
+  });
+  const compressionStarted = new Promise((resolve) => {
+    markCompressionStarted = resolve;
+  });
+  const fakeTinify = createFakeTinify({ compressedBuffer: Buffer.from('original image bytes') });
+  fakeTinify.fromBuffer = () => ({
+    async toBuffer() {
+      markCompressionStarted();
+      await compressionCanFinish;
+      return Buffer.from('original image bytes');
+    },
+  });
+  setTinifyClientForTesting(fakeTinify);
+
+  await withTemporaryImage('.png', Buffer.from('original image bytes'), async (filePath) => {
+    const hiddenPath = path.join(path.dirname(filePath), `.${path.basename(filePath)}${COMPRESSING_SUFFIX}`);
+    const compression = compressImage(filePath);
+
+    await compressionStarted;
+    await assert.rejects(fs.access(filePath), { code: 'ENOENT' });
+    assert.deepEqual(await fs.readFile(hiddenPath), Buffer.from('original image bytes'));
+
+    releaseCompression();
+    const result = await compression;
+
+    assert.equal(result.success, true);
+    assert.equal(result.skipped, true);
+    assert.match(result.reason, /not smaller/);
+    assert.deepEqual(await fs.readFile(filePath), Buffer.from('original image bytes'));
+    await assert.rejects(fs.access(hiddenPath), { code: 'ENOENT' });
+  });
+});
+
+test('compressImage restores the original file when compression fails', async () => {
+  process.env.TINIFY_API_KEY = 'test-key';
+  process.env.TINIFY_ENABLED = '1';
+  const fakeTinify = createFakeTinify({ compressedBuffer: Buffer.from('unused') });
+  const clientError = new fakeTinify.ClientError('bad image');
+  fakeTinify.fromBuffer = () => ({
+    async toBuffer() {
+      throw clientError;
+    },
+  });
+  setTinifyClientForTesting(fakeTinify);
+
+  await withTemporaryImage('.png', Buffer.from('original image bytes'), async (filePath) => {
+    const hiddenPath = path.join(path.dirname(filePath), `.${path.basename(filePath)}${COMPRESSING_SUFFIX}`);
+    const result = await compressImage(filePath);
+
+    assert.equal(result.success, false);
+    assert.match(result.error, /bad image/);
+    assert.deepEqual(await fs.readFile(filePath), Buffer.from('original image bytes'));
+    await assert.rejects(fs.access(hiddenPath), { code: 'ENOENT' });
   });
 });

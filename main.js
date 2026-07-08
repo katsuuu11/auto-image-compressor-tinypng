@@ -1,5 +1,6 @@
 const { app, Tray, Menu, BrowserWindow, dialog, nativeImage, ipcMain } = require('electron');
 const path = require('path');
+const fs = require('fs/promises');
 const { spawn } = require('child_process');
 const chokidar = require('chokidar');
 let store = null;
@@ -174,6 +175,9 @@ const folderWatchers = new Map();
 const processingFiles = new Set();
 const WATCHED_IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png']);
 const WATCHED_FILE_EXTENSIONS = new Set([...WATCHED_IMAGE_EXTENSIONS, '.zip']);
+const IN_PROGRESS_DOWNLOAD_EXTENSIONS = new Set(['.crdownload', '.download', '.part']);
+const COMPRESSING_SUFFIX = '.compressing';
+const COMPRESSED_TEMP_MARKER = '.compressed-';
 
 function pushLog(message) {
   const line = `[${new Date().toISOString()}] ${message}`;
@@ -214,7 +218,48 @@ async function postToServer(endpoint, filePath) {
 }
 
 function isWatchedFile(filePath) {
-  return WATCHED_FILE_EXTENSIONS.has(path.extname(filePath).toLowerCase());
+  const basename = path.basename(filePath);
+  const ext = path.extname(filePath).toLowerCase();
+
+  if (IN_PROGRESS_DOWNLOAD_EXTENSIONS.has(ext)) return false;
+  if (basename.includes(COMPRESSING_SUFFIX) || basename.includes(COMPRESSED_TEMP_MARKER)) return false;
+
+  return WATCHED_FILE_EXTENSIONS.has(ext);
+}
+
+async function restoreStaleCompressingFiles(folderPath) {
+  try {
+    const entries = await fs.readdir(folderPath, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      if (!entry.name.startsWith('.') || !entry.name.endsWith(COMPRESSING_SUFFIX)) continue;
+
+      const hiddenPath = path.join(folderPath, entry.name);
+      const restoredName = entry.name.slice(1, -COMPRESSING_SUFFIX.length);
+      const restoredPath = path.join(folderPath, restoredName);
+
+      if (await pathExists(restoredPath)) {
+        pushLog(`[watch] skipped stale temp recovery because target exists: ${hiddenPath}`);
+        continue;
+      }
+
+      await fs.rename(hiddenPath, restoredPath);
+      pushLog(`[watch] restored stale temp file: ${restoredPath}`);
+    }
+  } catch (error) {
+    pushLog(`[ERROR] Failed to restore stale temp files (${folderPath}): ${error.message}`);
+  }
+}
+
+async function pathExists(filePath) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
 }
 
 async function handleDetectedFile(filePath) {
@@ -241,6 +286,8 @@ async function handleDetectedFile(filePath) {
 
 function startWatchingFolder(folderPath) {
   if (folderWatchers.has(folderPath)) return;
+
+  restoreStaleCompressingFiles(folderPath);
 
   // Chokidar v4 does not expand glob patterns, so watch the directory
   // itself and filter the top-level add events by extension below.
