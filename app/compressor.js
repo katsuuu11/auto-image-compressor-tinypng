@@ -10,7 +10,8 @@ const SUPPORTED_FORMATS = new Set(['.jpg', '.jpeg', '.png']);
 const SKIPPED_FORMATS = new Set(['.gif', '.svg', '.webp', '.pdf']);
 const JPEG_MIN_BYTES = 1024 * 1024;
 const DEFAULT_JPEG_QUALITY = 86;
-const OUTPUT_DIR_NAME = 'compressed';
+const COMPRESSING_SUFFIX = '.compressing';
+const COMPRESSED_TEMP_SUFFIX = '.compressed';
 
 let tinifyClient;
 let tinifyExhaustedMonth = null;
@@ -23,8 +24,26 @@ function getFormat(filePath) {
   return path.extname(filePath).toLowerCase();
 }
 
-function getOutputFilePath(filePath) {
-  return path.join(path.dirname(filePath), OUTPUT_DIR_NAME, path.basename(filePath));
+function getHiddenCompressingFilePath(filePath) {
+  return path.join(path.dirname(filePath), `.${path.basename(filePath)}${COMPRESSING_SUFFIX}`);
+}
+
+function getCompressedTempFilePath(filePath) {
+  const uniqueSuffix = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return path.join(path.dirname(filePath), `.${path.basename(filePath)}${COMPRESSED_TEMP_SUFFIX}-${uniqueSuffix}`);
+}
+
+async function pathExists(filePath) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return false;
+    }
+
+    throw error;
+  }
 }
 
 function getReductionPercent(originalSize, compressedSize) {
@@ -200,28 +219,45 @@ async function compressImage(filePath) {
   }
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt += 1) {
+    let hiddenOriginalFilePath;
+    let compressedTempFilePath;
+    let originalStats;
+
     try {
       await fs.access(filePath);
+      hiddenOriginalFilePath = getHiddenCompressingFilePath(filePath);
+      compressedTempFilePath = getCompressedTempFilePath(filePath);
 
-      const originalBuffer = await fs.readFile(filePath);
+      if (await pathExists(hiddenOriginalFilePath)) {
+        throw new Error(`Temporary compressing file already exists: ${hiddenOriginalFilePath}`);
+      }
+
+      originalStats = await fs.stat(filePath);
+      await fs.rename(filePath, hiddenOriginalFilePath);
+
+      const originalBuffer = await fs.readFile(hiddenOriginalFilePath);
 
       if (isJpegFormat(ext) && originalBuffer.length < getJpegMinBytes()) {
+        await fs.rename(hiddenOriginalFilePath, filePath);
         return {
           success: true,
           skipped: true,
           reason: `JPEG is below compression threshold (${getJpegMinBytes()} bytes).`,
           filePath,
+          outputFilePath: filePath,
         };
       }
 
       const compressedResult = await writeCompressedBuffer(ext, originalBuffer, filePath);
 
       if (!compressedResult) {
+        await fs.rename(hiddenOriginalFilePath, filePath);
         return {
           success: true,
           skipped: true,
           reason: `Unsupported format: ${ext}`,
           filePath,
+          outputFilePath: filePath,
         };
       }
 
@@ -235,27 +271,55 @@ async function compressImage(filePath) {
       });
 
       if (compressedBuffer.length >= originalBuffer.length) {
+        await fs.rename(hiddenOriginalFilePath, filePath);
         return {
           success: true,
           skipped: true,
           reason: 'Compressed file is not smaller than original. Kept original.',
           filePath,
+          outputFilePath: filePath,
         };
       }
 
-      const outputFilePath = getOutputFilePath(filePath);
-      await fs.mkdir(path.dirname(outputFilePath), { recursive: true });
-      await fs.writeFile(outputFilePath, compressedBuffer);
+      await fs.writeFile(compressedTempFilePath, compressedBuffer);
+      const compressedStats = await fs.stat(compressedTempFilePath);
+
+      if (compressedStats.size !== compressedBuffer.length) {
+        throw new Error('Compressed temporary file size verification failed.');
+      }
+
+      if (await pathExists(filePath)) {
+        throw new Error(`Refusing to overwrite existing file during compression: ${filePath}`);
+      }
+
+      await fs.rename(compressedTempFilePath, filePath);
+      compressedTempFilePath = null;
+      await fs.utimes(filePath, originalStats.atime, originalStats.mtime).catch((error) => {
+        console.warn(`[WARN] Failed to preserve original image timestamps: ${error.message}`);
+      });
+      await fs.rm(hiddenOriginalFilePath, { force: true }).catch((error) => {
+        console.warn(`[WARN] Failed to remove original temp file: ${error.message}`);
+      });
 
       return {
         success: true,
         skipped: false,
         filePath,
-        outputFilePath,
+        outputFilePath: filePath,
         originalSize: originalBuffer.length,
         compressedSize: compressedBuffer.length,
       };
     } catch (error) {
+      if (compressedTempFilePath) {
+        await fs.rm(compressedTempFilePath, { force: true }).catch(() => {});
+      }
+
+      if (hiddenOriginalFilePath && await pathExists(hiddenOriginalFilePath).catch(() => false)) {
+        if (!await pathExists(filePath).catch(() => false)) {
+          await fs.rename(hiddenOriginalFilePath, filePath).catch(() => {});
+        }
+      }
+
       if (error.code === 'ENOENT') {
         return { success: false, error: 'File does not exist', filePath };
       }
@@ -292,7 +356,8 @@ function resetTinifyExhaustionForTesting() {
 }
 
 module.exports = {
-  OUTPUT_DIR_NAME,
+  COMPRESSED_TEMP_SUFFIX,
+  COMPRESSING_SUFFIX,
   compressImage,
   initializeTinify,
   resetTinifyExhaustionForTesting,
