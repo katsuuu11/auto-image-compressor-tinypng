@@ -209,14 +209,14 @@ async function compressImageWithDuplicateGuard(filePath, source = 'unknown') {
     return duplicateSkip;
   }
 
-  const signatureSkip = await getDuplicateCompressionSignatureSkip(filePath, source);
-  if (signatureSkip?.skip) {
-    return signatureSkip.skip;
-  }
-
   inProgressPaths.add(trackedPath);
 
   try {
+    const signatureSkip = await getDuplicateCompressionSignatureSkip(filePath, source);
+    if (signatureSkip?.skip) {
+      return signatureSkip.skip;
+    }
+
     const result = await compressImageHandler(filePath);
 
     if (result.success) {

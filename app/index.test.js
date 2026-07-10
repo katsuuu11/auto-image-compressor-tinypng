@@ -357,6 +357,34 @@ test('compressImageWithDuplicateGuard skips duplicate requests while a file is i
   assert.match(debugLogs.join('\n'), /source=second/);
 });
 
+test('compressImageWithDuplicateGuard marks existing files as in progress before reading signatures', async () => {
+  const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'image-compressor-'));
+  const filePath = path.join(temporaryDirectory, 'concurrent.png');
+  let calls = 0;
+
+  try {
+    await fs.writeFile(filePath, Buffer.from('existing image bytes'));
+    setCompressImageForTesting(async (imagePath) => {
+      calls += 1;
+      return { success: true, skipped: false, filePath: imagePath };
+    });
+
+    const [firstResult, duplicateResult] = await Promise.all([
+      compressImageWithDuplicateGuard(filePath, 'first'),
+      compressImageWithDuplicateGuard(filePath, 'second'),
+    ]);
+
+    assert.equal(firstResult.success, true);
+    assert.equal(firstResult.skipped, false);
+    assert.equal(duplicateResult.success, true);
+    assert.equal(duplicateResult.skipped, true);
+    assert.match(duplicateResult.reason, /inProgress/);
+    assert.equal(calls, 1);
+  } finally {
+    await fs.rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
 test('compressImageWithDuplicateGuard skips completed paths during cooldown only', async () => {
   process.env.COMPRESS_DUPLICATE_COOLDOWN_MS = '20';
   let calls = 0;
