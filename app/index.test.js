@@ -389,6 +389,44 @@ test('compressImageWithDuplicateGuard skips completed paths during cooldown only
   assert.match(debugLogs.join('\n'), /source=second/);
 });
 
+test('compressImageWithDuplicateGuard skips renamed files that were already compressed', async () => {
+  const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'image-compressor-'));
+  let calls = 0;
+
+  try {
+    const originalPath = path.join(temporaryDirectory, 'image.png');
+    const renamedPath = path.join(temporaryDirectory, 'renamed.png');
+    const compressedContents = Buffer.from('compressed image bytes');
+
+    await fs.writeFile(originalPath, Buffer.from('original image bytes'));
+    setCompressImageForTesting(async (filePath) => {
+      calls += 1;
+      await fs.writeFile(filePath, compressedContents);
+      return {
+        success: true,
+        skipped: false,
+        filePath,
+        outputFilePath: filePath,
+        originalSize: 20,
+        compressedSize: compressedContents.length,
+      };
+    });
+
+    const firstResult = await compressImageWithDuplicateGuard(originalPath, 'first');
+    await fs.rename(originalPath, renamedPath);
+    const renamedResult = await compressImageWithDuplicateGuard(renamedPath, 'rename');
+
+    assert.equal(firstResult.success, true);
+    assert.equal(firstResult.skipped, false);
+    assert.equal(renamedResult.success, true);
+    assert.equal(renamedResult.skipped, true);
+    assert.match(renamedResult.reason, /alreadyCompressedContent/);
+    assert.equal(calls, 1);
+  } finally {
+    await fs.rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
 test('compressImageWithDuplicateGuard does not cooldown failed compression results', async () => {
   let calls = 0;
   setCompressImageForTesting(async (filePath) => {
