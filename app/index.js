@@ -2,6 +2,7 @@ require('dotenv/config');
 const path = require('node:path');
 const fs = require('node:fs/promises');
 const fss = require('node:fs');
+const crypto = require('node:crypto');
 const { TextDecoder } = require('node:util');
 const express = require('express');
 const unzipper = require('unzipper');
@@ -21,6 +22,7 @@ const RECENT_EXTRACT_TTL_MS = 5000;
 
 const inProgressPaths = new Set();
 const recentlyCompletedPaths = new Map();
+const recentlyCompletedFileSignatures = new Map();
 const recentExtractPaths = new Map();
 let compressImageHandler = compressImage;
 
@@ -112,6 +114,18 @@ function getTrackedPath(filePath) {
   return path.resolve(filePath);
 }
 
+
+async function getFileSignature(filePath) {
+  const buffer = await fs.readFile(filePath);
+  return crypto.createHash('sha256').update(buffer).digest('hex');
+}
+
+function trackCompletedFileSignature(signature, now = Date.now()) {
+  if (signature) {
+    recentlyCompletedFileSignatures.set(signature, now);
+  }
+}
+
 function getDuplicateSkipResult({ filePath, source, reason }) {
   console.debug(`[compressImage] skipped reason=${reason} source=${source} path=${filePath}`);
 
@@ -127,6 +141,12 @@ function cleanupRecentlyCompletedPaths(now = Date.now()) {
   for (const [trackedPath, completedAt] of recentlyCompletedPaths.entries()) {
     if (now - completedAt > RECENT_COMPLETION_TTL_MS) {
       recentlyCompletedPaths.delete(trackedPath);
+    }
+  }
+
+  for (const [signature, completedAt] of recentlyCompletedFileSignatures.entries()) {
+    if (now - completedAt > RECENT_COMPLETION_TTL_MS) {
+      recentlyCompletedFileSignatures.delete(signature);
     }
   }
 }
@@ -152,6 +172,35 @@ function getDuplicateCompressionSkip(filePath, source) {
   return null;
 }
 
+async function getDuplicateCompressionSignatureSkip(filePath, source) {
+  let signature;
+
+  try {
+    signature = await getFileSignature(filePath);
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return null;
+    }
+    throw error;
+  }
+
+  const completedAt = recentlyCompletedFileSignatures.get(signature);
+  if (completedAt === undefined) {
+    return { signature, skip: null };
+  }
+
+  const elapsedMs = Date.now() - completedAt;
+  if (elapsedMs < RECENT_COMPLETION_TTL_MS) {
+    return {
+      signature,
+      skip: getDuplicateSkipResult({ filePath, source, reason: 'alreadyCompressedContent' }),
+    };
+  }
+
+  recentlyCompletedFileSignatures.delete(signature);
+  return { signature, skip: null };
+}
+
 async function compressImageWithDuplicateGuard(filePath, source = 'unknown') {
   const trackedPath = getTrackedPath(filePath);
   const duplicateSkip = getDuplicateCompressionSkip(filePath, source);
@@ -160,13 +209,29 @@ async function compressImageWithDuplicateGuard(filePath, source = 'unknown') {
     return duplicateSkip;
   }
 
+  const signatureSkip = await getDuplicateCompressionSignatureSkip(filePath, source);
+  if (signatureSkip?.skip) {
+    return signatureSkip.skip;
+  }
+
   inProgressPaths.add(trackedPath);
 
   try {
     const result = await compressImageHandler(filePath);
 
     if (result.success) {
-      recentlyCompletedPaths.set(trackedPath, Date.now());
+      const completedAt = Date.now();
+      recentlyCompletedPaths.set(trackedPath, completedAt);
+
+      if (!result.skipped) {
+        try {
+          trackCompletedFileSignature(await getFileSignature(result.outputFilePath || filePath), completedAt);
+        } catch (error) {
+          if (error.code !== 'ENOENT') {
+            console.warn(`[WARN] Failed to track compressed file signature: ${error.message}`);
+          }
+        }
+      }
     }
 
     return result;
@@ -358,6 +423,7 @@ module.exports = {
   resetDuplicateCompressionStateForTesting() {
     inProgressPaths.clear();
     recentlyCompletedPaths.clear();
+    recentlyCompletedFileSignatures.clear();
     recentExtractPaths.clear();
     compressImageHandler = compressImage;
   },
